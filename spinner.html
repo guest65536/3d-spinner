@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>地球スピナー</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: radial-gradient(circle at 50% 38%, #0c1830 0%, #060a16 65%, #03050c 100%);
+    font-family: -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #canvas.grabbing { cursor: grabbing; }
+  #hud {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    color: #cfe0ff; pointer-events: none; text-align: center;
+  }
+  #rpm { font-size: 30px; font-weight: 600; letter-spacing: 0.5px; font-variant-numeric: tabular-nums;
+         text-shadow: 0 0 14px rgba(90,150,255,0.5); }
+  #rpm small { font-size: 13px; font-weight: 400; opacity: 0.6; margin-left: 4px; }
+  #barWrap { width: 180px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.10); overflow: hidden; }
+  #bar { height: 100%; width: 0%; border-radius: 3px;
+         background: linear-gradient(90deg, #4a7cff, #7fd0ff); transition: width 0.05s linear; }
+  #hint { position: fixed; bottom: 18px; left: 0; right: 0; text-align: center;
+          color: rgba(200,215,255,0.35); font-size: 13px; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="hud">
+  <div id="rpm">0<small>RPM</small></div>
+  <div id="barWrap"><div id="bar"></div></div>
+</div>
+<div id="hint">ドラッグして回す</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+  const rpmEl = document.getElementById("rpm");
+  const barEl = document.getElementById("bar");
+
+  // ==========================================================
+  // 1. 手続き的な地球テクスチャ生成（正距円筒 / equirectangular）
+  //    3Dノイズを球面方向でサンプルするため継ぎ目・極の歪みが出ない
+  // ==========================================================
+  const TW = 640, TH = 320;           // テクスチャ解像度
+  const tex = new Uint8ClampedArray(TW * TH * 3);
+
+  function hash3(i, j, k) {
+    let n = Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(k, 1274126177);
+    n = (n ^ (n >>> 13)) >>> 0;
+    n = Math.imul(n, 1274126177) >>> 0;
+    n = (n ^ (n >>> 16)) >>> 0;
+    return n / 4294967295;
+  }
+  function smooth(t) { return t * t * (3 - 2 * t); }
+  function vnoise(x, y, z) {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = smooth(xf), v = smooth(yf), w = smooth(zf);
+    const c000 = hash3(xi,   yi,   zi),   c100 = hash3(xi+1, yi,   zi);
+    const c010 = hash3(xi,   yi+1, zi),   c110 = hash3(xi+1, yi+1, zi);
+    const c001 = hash3(xi,   yi,   zi+1), c101 = hash3(xi+1, yi,   zi+1);
+    const c011 = hash3(xi,   yi+1, zi+1), c111 = hash3(xi+1, yi+1, zi+1);
+    const x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u;
+    const x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u;
+    const y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
+    return y0 + (y1 - y0) * w;
+  }
+  function fbm(x, y, z, oct) {
+    let sum = 0, amp = 1, freq = 1, norm = 0;
+    for (let o = 0; o < oct; o++) {
+      sum += amp * vnoise(x * freq, y * freq, z * freq);
+      norm += amp; amp *= 0.5; freq *= 2;
+    }
+    return sum / norm;
+  }
+  function mix(a, b, t) { return a + (b - a) * t; }
+
+  (function buildTexture() {
+    const SEA = 0.48;
+    for (let ty = 0; ty < TH; ty++) {
+      const lat = (0.5 - ty / TH) * Math.PI;         // +π/2 .. -π/2
+      const cl = Math.cos(lat), sl = Math.sin(lat);
+      const absLat = Math.abs(lat);
+      for (let tx = 0; tx < TW; tx++) {
+        const lon = (tx / TW - 0.5) * Math.PI * 2;
+        const dx = cl * Math.sin(lon), dy = sl, dz = cl * Math.cos(lon);
+
+        // 大陸・湿度・雲を別オフセットのノイズで
+        const e = fbm(dx * 1.8 + 11.3, dy * 1.8 + 4.7,  dz * 1.8 + 19.1, 5); // 標高
+        const m = fbm(dx * 2.6 - 7.2,  dy * 2.6 + 21.5, dz * 2.6 - 3.4,  4); // 湿度
+        const c = fbm(dx * 3.1 + 40.0, dy * 3.1 - 15.0, dz * 3.1 + 8.0,  4); // 雲
+
+        let r, g, b;
+        if (e < SEA) {
+          // 海：深さで濃淡
+          const d = (SEA - e) / SEA;                 // 0(浅) .. 1(深)
+          r = mix(28, 8,  d); g = mix(96, 30, d); b = mix(150, 70, d);
+        } else {
+          const h = (e - SEA) / (1 - SEA);            // 0 .. 1（標高）
+          if (h < 0.045) {
+            r = 208; g = 190; b = 140;               // 海岸の砂
+          } else {
+            const wet = smooth(Math.max(0, Math.min(1, (m - 0.35) / 0.28)));
+            r = mix(196, 46,  wet); g = mix(174, 112, wet); b = mix(104, 44, wet); // 砂漠↔森
+            if (h > 0.5) {                            // 山岳（岩）
+              const t = Math.min(1, (h - 0.5) / 0.4);
+              r = mix(r, 120, t); g = mix(g, 104, t); b = mix(b, 92, t);
+            }
+            if (h > 0.78) {                           // 高山の雪
+              const t = Math.min(1, (h - 0.78) / 0.18);
+              r = mix(r, 236, t); g = mix(g, 238, t); b = mix(b, 242, t);
+            }
+          }
+        }
+        // 極の氷冠
+        const ice = smooth(Math.max(0, Math.min(1, (absLat - 1.24) / 0.22)));
+        r = mix(r, 240, ice); g = mix(g, 245, ice); b = mix(b, 250, ice);
+        // 雲
+        const cloud = smooth(Math.max(0, Math.min(1, (c - 0.56) / 0.16))) * 0.9;
+        r = mix(r, 250, cloud); g = mix(g, 250, cloud); b = mix(b, 252, cloud);
+
+        const idx = (ty * TW + tx) * 3;
+        tex[idx] = r; tex[idx + 1] = g; tex[idx + 2] = b;
+      }
+    }
+  })();
+
+  // ==========================================================
+  // 2. Canvas / スフィアバッファ
+  // ==========================================================
+  let cw = 0, ch = 0, cx = 0, cy = 0, R = 0, dpr = 1;
+  const sphereCanvas = document.createElement("canvas");
+  const sphereCtx = sphereCanvas.getContext("2d");
+  let DIAM = 0, imgData = null, buf = null;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cw = window.innerWidth; ch = window.innerHeight;
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = cw / 2; cy = ch / 2;
+    R = Math.min(cw, ch) * 0.36;
+    // 球体の内部描画解像度（負荷を上限で抑える）
+    DIAM = Math.max(64, Math.min(Math.round(2 * R), 400));
+    sphereCanvas.width = DIAM; sphereCanvas.height = DIAM;
+    imgData = sphereCtx.createImageData(DIAM, DIAM);
+    buf = imgData.data;
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ==========================================================
+  // 3. クォータニオン
+  // ==========================================================
+  function qMul(a, b) {
+    const aw=a[0],ax=a[1],ay=a[2],az=a[3], bw=b[0],bx=b[1],by=b[2],bz=b[3];
+    return [
+      aw*bw - ax*bx - ay*by - az*bz,
+      aw*bx + ax*bw + ay*bz - az*by,
+      aw*by - ax*bz + ay*bw + az*bx,
+      aw*bz + ax*by - ay*bx + az*bw
+    ];
+  }
+  function qNorm(q) {
+    const l = Math.hypot(q[0],q[1],q[2],q[3]) || 1;
+    return [q[0]/l, q[1]/l, q[2]/l, q[3]/l];
+  }
+  function qFromAxisAngle(ax, ay, az, angle) {
+    const len = Math.hypot(ax, ay, az);
+    if (len < 1e-9 || angle === 0) return [1,0,0,0];
+    const s = Math.sin(angle/2) / len;
+    return [Math.cos(angle/2), ax*s, ay*s, az*s];
+  }
+  function qToMatrix(q) {
+    const w=q[0],x=q[1],y=q[2],z=q[3];
+    const xx=x*x, yy=y*y, zz=z*z, xy=x*y, xz=x*z, yz=y*z, wx=w*x, wy=w*y, wz=w*z;
+    return [
+      1-2*(yy+zz), 2*(xy-wz),   2*(xz+wy),
+      2*(xy+wz),   1-2*(xx+zz), 2*(yz-wx),
+      2*(xz-wy),   2*(yz+wx),   1-2*(xx+yy)
+    ];
+  }
+
+  let orientation = qNorm([1, 0.06, 0.12, 0]);
+
+  // ==========================================================
+  // 4. 球体レンダリング（フロント半球をピクセル毎にテクスチャサンプル）
+  // ==========================================================
+  const INV2PI = 1 / (Math.PI * 2), INVPI = 1 / Math.PI;
+  // 光源方向（視点座標・固定）: 左上手前から
+  const Ll = Math.hypot(-0.45, 0.55, 0.85);
+  const Lx = -0.45/Ll, Ly = 0.55/Ll, Lz = 0.85/Ll;
+  const AMB = 0.30;
+
+  function renderGlobe() {
+    const m = qToMatrix(orientation);
+    const m0=m[0],m1=m[1],m2=m[2],m3=m[3],m4=m[4],m5=m[5],m6=m[6],m7=m[7],m8=m[8];
+    const half = DIAM / 2, inv = 1 / half;
+    const edgeStart = 1 - 3 / DIAM, edgeW = 3 / DIAM;
+
+    for (let py = 0; py < DIAM; py++) {
+      const ny = (half - (py + 0.5)) * inv;   // 上が +
+      const ny2 = ny * ny;
+      let idx = py * DIAM * 4;
+      for (let px = 0; px < DIAM; px++, idx += 4) {
+        const nx = (px + 0.5 - half) * inv;
+        const d2 = nx * nx + ny2;
+        if (d2 > 1) { buf[idx + 3] = 0; continue; }
+        const nz = Math.sqrt(1 - d2);
+
+        // 視点座標の法線を逆回転 → モデル座標（M の転置）
+        const mx = m0*nx + m3*ny + m6*nz;
+        const my = m1*nx + m4*ny + m7*nz;
+        const mz = m2*nx + m5*ny + m8*nz;
+
+        const lon = Math.atan2(mx, mz);
+        const lat = Math.asin(my > 1 ? 1 : my < -1 ? -1 : my);
+        let u = ((lon * INV2PI) + 0.5) * TW;
+        let v = (0.5 - lat * INVPI) * TH;
+        let tx = u | 0, tyy = v | 0;
+        tx = ((tx % TW) + TW) % TW;
+        if (tyy < 0) tyy = 0; else if (tyy >= TH) tyy = TH - 1;
+        const ti = (tyy * TW + tx) * 3;
+
+        // ライティング
+        let diff = nx*Lx + ny*Ly + nz*Lz;
+        if (diff < 0) diff = 0;
+        const shade = AMB + (1 - AMB) * diff;
+
+        // 縁のアンチエイリアス
+        const r = Math.sqrt(d2);
+        let a = 255;
+        if (r > edgeStart) a = (1 - (r - edgeStart) / edgeW) * 255;
+
+        buf[idx]     = tex[ti]     * shade;
+        buf[idx + 1] = tex[ti + 1] * shade;
+        buf[idx + 2] = tex[ti + 2] * shade;
+        buf[idx + 3] = a < 0 ? 0 : a;
+      }
+    }
+    sphereCtx.putImageData(imgData, 0, 0);
+
+    ctx.clearRect(0, 0, cw, ch);
+    // 大気のグロー（球体の背後）
+    const atmo = ctx.createRadialGradient(cx, cy, R * 0.92, cx, cy, R * 1.16);
+    atmo.addColorStop(0, "rgba(90,150,255,0.35)");
+    atmo.addColorStop(1, "rgba(90,150,255,0)");
+    ctx.beginPath(); ctx.arc(cx, cy, R * 1.16, 0, Math.PI*2);
+    ctx.fillStyle = atmo; ctx.fill();
+    // 地球本体
+    ctx.drawImage(sphereCanvas, cx - R, cy - R, 2 * R, 2 * R);
+  }
+
+  // ==========================================================
+  // 5. 操作（Pointer Events）＋ 慣性
+  // ==========================================================
+  const ROT_PER_PX = 0.006;
+  const FRICTION = 0.988;
+  const STOP_THRESHOLD = 0.0004;
+
+  let dragging = false, pointerId = null, lastX = 0, lastY = 0;
+  let angVel = [0, 0, 0];
+  const samples = [];
+  const SAMPLE_WINDOW = 120;
+
+  function rotateBy(dx, dy) {
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1e-6) return null;
+    const angle = dist * ROT_PER_PX;
+    const dq = qFromAxisAngle(dy, dx, 0, angle);
+    orientation = qNorm(qMul(dq, orientation));
+    const s = angle / dist;
+    return [dy * s, dx * s, 0];
+  }
+  function getXY(e) {
+    const rect = canvas.getBoundingClientRect();
+    return [e.clientX - rect.left, e.clientY - rect.top];
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    if (pointerId !== null) return;
+    pointerId = e.pointerId; dragging = true;
+    canvas.classList.add("grabbing");
+    canvas.setPointerCapture(pointerId);
+    const [x, y] = getXY(e); lastX = x; lastY = y;
+    angVel = [0, 0, 0]; samples.length = 0;
+    e.preventDefault();
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!dragging || e.pointerId !== pointerId) return;
+    const [x, y] = getXY(e);
+    const dx = x - lastX, dy = y - lastY;
+    lastX = x; lastY = y;
+    const rv = rotateBy(dx, dy);
+    if (rv) {
+      samples.push({ vx: rv[0], vy: rv[1], vz: rv[2], t: performance.now() });
+      if (samples.length > 8) samples.shift();
+    }
+    e.preventDefault();
+  });
+  function endDrag(e) {
+    if (e.pointerId !== pointerId) return;
+    dragging = false;
+    canvas.classList.remove("grabbing");
+    try { canvas.releasePointerCapture(pointerId); } catch (_) {}
+    pointerId = null;
+    const now = performance.now();
+    let sx=0, sy=0, sz=0, cnt=0;
+    for (const s of samples) {
+      if (now - s.t <= SAMPLE_WINDOW) { sx+=s.vx; sy+=s.vy; sz+=s.vz; cnt++; }
+    }
+    angVel = cnt > 0 ? [sx/cnt, sy/cnt, sz/cnt] : [0, 0, 0];
+    samples.length = 0;
+  }
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+
+  // ==========================================================
+  // 6. ループ / 速度表示
+  // ==========================================================
+  let lastT = performance.now();
+  let displayRPM = 0;
+
+  function frame(now) {
+    const dt = Math.min(now - lastT, 100);
+    lastT = now;
+
+    if (!dragging) {
+      const speed = Math.hypot(angVel[0], angVel[1], angVel[2]);
+      if (speed > STOP_THRESHOLD) {
+        const frames = dt / (1000 / 60);
+        const angle = speed * frames;
+        const dq = qFromAxisAngle(angVel[0], angVel[1], angVel[2], angle);
+        orientation = qNorm(qMul(dq, orientation));
+        const decay = Math.pow(FRICTION, frames);
+        angVel[0]*=decay; angVel[1]*=decay; angVel[2]*=decay;
+      } else {
+        angVel[0]=0; angVel[1]=0; angVel[2]=0;
+      }
+    }
+
+    const curSpeed = Math.hypot(angVel[0], angVel[1], angVel[2]);
+    const rpm = (curSpeed * 60) / (2*Math.PI) * 60;
+    displayRPM = displayRPM * 0.8 + rpm * 0.2;
+    rpmEl.innerHTML = Math.round(displayRPM) + '<small>RPM</small>';
+    barEl.style.width = Math.min(100, displayRPM / 6).toFixed(1) + "%";
+
+    renderGlobe();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // 初期のゆっくり自転
+  angVel = [0.001, 0.006, 0];
+
+})();
+</script>
+</body>
+</html>
