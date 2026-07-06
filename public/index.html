@@ -61,13 +61,12 @@
 
 <div id="panel">
   <div class="row">
-    <input id="urlInput" type="text" placeholder="地球画像のURL"
-      value="https://upload.wikimedia.org/wikipedia/commons/8/83/Equirectangular_projection_SW.jpg">
+    <input id="urlInput" type="text" placeholder="地球画像のURL（正距円筒2:1）">
     <button id="urlBtn">読込</button>
   </div>
   <div class="row">
     <label class="btn" style="flex:1">画像を選択<input id="fileInput" type="file" accept="image/*"></label>
-    <button id="genBtn" style="flex:1">自動生成に戻す</button>
+    <button id="genBtn" style="flex:1">地球に戻す</button>
   </div>
   <div id="msg"></div>
 </div>
@@ -94,74 +93,11 @@
   let TW = 640, TH = 320;
   let tex = new Uint8ClampedArray(TW * TH * 3);
 
-  function mix(a, b, t) { return a + (b - a) * t; }
+  // 起動時に読み込むデフォルトの地球写真（アプリと同一オリジンのローカル画像）
+  const DEFAULT_TEXTURE = "earth.jpg";
 
-  // ---- 手続き的な地球テクスチャ（3Dノイズ・完全オフライン） ----
-  function hash3(i, j, k) {
-    let n = Math.imul(i, 374761393) + Math.imul(j, 668265263) + Math.imul(k, 1274126177);
-    n = (n ^ (n >>> 13)) >>> 0;
-    n = Math.imul(n, 1274126177) >>> 0;
-    n = (n ^ (n >>> 16)) >>> 0;
-    return n / 4294967295;
-  }
-  function smooth(t) { return t * t * (3 - 2 * t); }
-  function vnoise(x, y, z) {
-    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
-    const xf = x - xi, yf = y - yi, zf = z - zi;
-    const u = smooth(xf), v = smooth(yf), w = smooth(zf);
-    const c000 = hash3(xi,yi,zi),     c100 = hash3(xi+1,yi,zi);
-    const c010 = hash3(xi,yi+1,zi),   c110 = hash3(xi+1,yi+1,zi);
-    const c001 = hash3(xi,yi,zi+1),   c101 = hash3(xi+1,yi,zi+1);
-    const c011 = hash3(xi,yi+1,zi+1), c111 = hash3(xi+1,yi+1,zi+1);
-    const x00 = c000+(c100-c000)*u, x10 = c010+(c110-c010)*u;
-    const x01 = c001+(c101-c001)*u, x11 = c011+(c111-c011)*u;
-    const y0 = x00+(x10-x00)*v, y1 = x01+(x11-x01)*v;
-    return y0 + (y1 - y0) * w;
-  }
-  function fbm(x, y, z, oct) {
-    let sum = 0, amp = 1, freq = 1, norm = 0;
-    for (let o = 0; o < oct; o++) { sum += amp*vnoise(x*freq,y*freq,z*freq); norm += amp; amp *= 0.5; freq *= 2; }
-    return sum / norm;
-  }
-  function buildProceduralTexture() {
-    TW = 640; TH = 320;
-    const nt = new Uint8ClampedArray(TW * TH * 3);
-    const SEA = 0.48;
-    for (let ty = 0; ty < TH; ty++) {
-      const lat = (0.5 - ty / TH) * Math.PI;
-      const cl = Math.cos(lat), sl = Math.sin(lat), absLat = Math.abs(lat);
-      for (let tx = 0; tx < TW; tx++) {
-        const lon = (tx / TW - 0.5) * Math.PI * 2;
-        const dx = cl*Math.sin(lon), dy = sl, dz = cl*Math.cos(lon);
-        const e = fbm(dx*1.8+11.3, dy*1.8+4.7,  dz*1.8+19.1, 5);
-        const m = fbm(dx*2.6-7.2,  dy*2.6+21.5, dz*2.6-3.4,  4);
-        const c = fbm(dx*3.1+40.0, dy*3.1-15.0, dz*3.1+8.0,  4);
-        let r, g, b;
-        if (e < SEA) {
-          const d = (SEA - e) / SEA;
-          r = mix(28,8,d); g = mix(96,30,d); b = mix(150,70,d);
-        } else {
-          const h = (e - SEA) / (1 - SEA);
-          if (h < 0.045) { r=208; g=190; b=140; }
-          else {
-            const wet = smooth(Math.max(0, Math.min(1, (m-0.35)/0.28)));
-            r = mix(196,46,wet); g = mix(174,112,wet); b = mix(104,44,wet);
-            if (h > 0.5) { const t = Math.min(1,(h-0.5)/0.4); r=mix(r,120,t); g=mix(g,104,t); b=mix(b,92,t); }
-            if (h > 0.78){ const t = Math.min(1,(h-0.78)/0.18); r=mix(r,236,t); g=mix(g,238,t); b=mix(b,242,t); }
-          }
-        }
-        const ice = smooth(Math.max(0, Math.min(1, (absLat-1.24)/0.22)));
-        r = mix(r,240,ice); g = mix(g,245,ice); b = mix(b,250,ice);
-        const cloud = smooth(Math.max(0, Math.min(1, (c-0.56)/0.16))) * 0.9;
-        r = mix(r,250,cloud); g = mix(g,250,cloud); b = mix(b,252,cloud);
-        const idx = (ty*TW+tx)*3;
-        nt[idx]=r; nt[idx+1]=g; nt[idx+2]=b;
-      }
-    }
-    tex = nt;
-    setMsg("");
-  }
-  buildProceduralTexture();
+  // 画像デコード前の一瞬の初期表示用に海色で塗っておく
+  for (let i = 0; i < tex.length; i += 3) { tex[i] = 20; tex[i+1] = 70; tex[i+2] = 120; }
 
   // ---- 画像からテクスチャを取り込む（正距円筒 2:1 前提） ----
   function setTextureFromImage(img) {
@@ -198,10 +134,13 @@
     reader.readAsDataURL(file);
   }
   function setMsg(s) { msgEl.textContent = s; }
+  function loadDefault() { loadFromURL(DEFAULT_TEXTURE); }
 
   document.getElementById("urlBtn").addEventListener("click", () => loadFromURL(document.getElementById("urlInput").value.trim()));
   document.getElementById("fileInput").addEventListener("change", (e) => loadFromFile(e.target.files[0]));
-  document.getElementById("genBtn").addEventListener("click", buildProceduralTexture);
+  document.getElementById("genBtn").addEventListener("click", loadDefault);
+
+  loadDefault();   // 起動時にデフォルトの地球写真を読み込む
 
   // ==========================================================
   // Canvas / スフィアバッファ
