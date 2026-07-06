@@ -1,0 +1,7 @@
+name = "3d-spinner"
+compatibility_date = "2025-01-01"
+
+# 静的アセットのみを配信する Worker（サーバコードなし）
+# public/ 配下を配信し、ルート / で index.html を返す
+[assets]
+directory = "./public"
