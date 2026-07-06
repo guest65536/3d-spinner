@@ -2,7 +2,7 @@
 
 ブラウザで動く球体型ハンドスピナー。ドラッグで自由軸回転し、ベアリング風の慣性でひたすら回ります。外部ライブラリなしの単体 HTML（Canvas 2D のみ）。
 
-**公開URL**: （Cloudflare Pages のデプロイ後に記載）
+**公開URL**: https://3d-spinner.ryo-email.workers.dev
 
 ## 特徴
 
