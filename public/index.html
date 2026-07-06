@@ -332,6 +332,7 @@
   const STOP_THRESHOLD = 0.0004;
   const MAX_SPEED = 0.45;      // rad/frame（加速の上限）
   const CARRY = 0.9;           // 離す前の勢いをどれだけ引き継ぐか
+  const FLICK_MIN = 0.006;     // これ未満のフリックは「掴んで止めた」とみなし慣性を引き継がない
   const MAX_RPM = MAX_SPEED * 3600 / (2 * Math.PI); // バー/発光の基準
 
   let dragging = false, pointerId = null, lastX = 0, lastY = 0;
@@ -377,11 +378,17 @@
     let sx=0, sy=0, sz=0, cnt=0;
     for (const s of samples) if (now - s.t <= SAMPLE_WINDOW) { sx+=s.vx; sy+=s.vy; sz+=s.vz; cnt++; }
     const fx = cnt ? sx/cnt : 0, fy = cnt ? sy/cnt : 0, fz = cnt ? sz/cnt : 0;
-    // 既存の勢い(carry) に新しいフリックを加算 → 同方向なら加速、逆方向なら減速
-    let nx = carry[0]*CARRY + fx, ny = carry[1]*CARRY + fy, nz = carry[2]*CARRY + fz;
-    const mag = Math.hypot(nx, ny, nz);
-    if (mag > MAX_SPEED) { const k = MAX_SPEED / mag; nx*=k; ny*=k; nz*=k; }
-    angVel = [nx, ny, nz];
+    const flingMag = Math.hypot(fx, fy, fz);
+    if (flingMag < FLICK_MIN) {
+      // 指を止めたまま離した → 掴んで止めたとみなし、元の回転を再開しない
+      angVel = [0, 0, 0];
+    } else {
+      // フリックあり → 既存の勢い(carry)に加算（同方向なら加速、逆方向なら減速）
+      let nx = carry[0]*CARRY + fx, ny = carry[1]*CARRY + fy, nz = carry[2]*CARRY + fz;
+      const mag = Math.hypot(nx, ny, nz);
+      if (mag > MAX_SPEED) { const k = MAX_SPEED / mag; nx*=k; ny*=k; nz*=k; }
+      angVel = [nx, ny, nz];
+    }
     samples.length = 0;
   }
   canvas.addEventListener("pointerup", endDrag);
